@@ -224,7 +224,6 @@ describe(Support.getTestDialectTeaser('Include'), function() {
       Category.hasMany(SubCategory, {foreignKey: 'boundCategory'});
       SubCategory.belongsTo(Category, {foreignKey: 'boundCategory'});
 
-
       return this.sequelize.sync({force: true}).then(function() {
         return User.find({
           include: [
@@ -279,6 +278,7 @@ describe(Support.getTestDialectTeaser('Include'), function() {
       Product.hasMany(Tag, {through: ProductTag});
       Tag.hasMany(Product, {through: ProductTag});
 
+      var self = this;
       return this.sequelize.sync({force: true}).then(function() {
         return Promise.join(
           Set.bulkCreate([
@@ -1435,8 +1435,13 @@ describe(Support.getTestDialectTeaser('Include'), function() {
       return this.fixtureA().then(function () {
         return self.models.Product.findAll({
           attributes: ['id', 'title'],
+          where: {
+            Company: {
+              name: 'NYSE'
+            }
+          },
           include: [
-            {model: self.models.Company, where: {name: 'NYSE'}},
+            {model: self.models.Company, /*where: {name: 'NYSE'}*/},
             {model: self.models.Tag},
             {model: self.models.Price}
           ],
@@ -1930,6 +1935,351 @@ describe(Support.getTestDialectTeaser('Include'), function() {
             expect(users[2].Company.rank).to.equal(2);
           });
         });
+      });
+    });
+
+    describe('Searching included models from main where clause', function() {
+      var User, Group, Permission;
+      beforeEach(function() {
+        User = this.sequelize.define('User', { name: DataTypes.STRING(200) }, { timestamps: false });
+        Group = this.sequelize.define('Group', { name: DataTypes.STRING(200) }, { timestamps: false });
+        Permission = this.sequelize.define('Permission', { type: DataTypes.STRING(200) }, { timestamps: false });
+
+        User.belongsToMany(Group, { through: 'UsersGroups' });
+        User.belongsTo(Permission);
+        Group.belongsToMany(User, { through: 'UsersGroups' });
+        Group.belongsTo(Permission);
+        Permission.hasMany(User);
+        Permission.belongsToMany(Group, { through: 'GroupsPermissions' });
+        User.belongsToMany(Group, { through: 'UsersGroups' });
+        Group.belongsToMany(User, { through: 'UsersGroups' });
+
+        var users = [{ name: 'UserWithGroupWithAdminPermission' },
+                     { name: 'UserWithAdminPermission' },
+                     { name: 'UserWithAdminPermissionAndGroupWithAdminPermission'},
+                     { name: 'UserWithUserPermissionAndGroupWithUserPermission' },
+                     { name: 'UserWithUserPermission'},
+                     { name: 'UserWithNoPermissionOrGroup' }]
+          , groups = [{ name: 'GroupWithAdminPermission'},
+                      { name: 'GroupWithUserPermission'},
+                      { name: "GroupWithNoPermission"}]
+          , permissions = [{type: 'admin'},
+                           {type: 'user'}];
+
+        return this.sequelize.sync({ force: true }).then(function() {
+          return Promise.all([
+              User.create(users[0]),
+              User.create(users[1]),
+              User.create(users[2]),
+              User.create(users[3]),
+              User.create(users[4]),
+              Group.create(groups[0]),
+              Group.create(groups[1]),
+              Group.create(groups[2]),
+              Permission.create(permissions[0]),
+              Permission.create(permissions[1])
+            ]).then(function(instances) {
+              var userInstances = instances.slice(0, 5);
+              var groupInstances = instances.slice(5, 8);
+              var permissionInstances = instances.slice(8);
+
+              return Promise.all([
+                userInstances[0].setGroups([groupInstances[0]]),
+                userInstances[1].setPermission(permissionInstances[0]),
+                userInstances[2].setGroups([groupInstances[0]]),
+                userInstances[2].setPermission(permissionInstances[0]),
+                userInstances[3].setGroups([groupInstances[1]]),
+                userInstances[3].setPermission(permissionInstances[1]),
+                userInstances[4].setPermission(permissionInstances[1]),
+                groupInstances[0].setPermission(permissionInstances[0]),
+                groupInstances[1].setPermission(permissionInstances[1])
+              ]);
+            });
+        });
+      });
+
+      it('should return a user with a group with a name like AdminPermission', function() {
+        return User.findAll({
+          where: {
+            Groups: {
+              name: { like: '%AdminPermission%' }
+            }
+          },
+          include: [{
+            model: Group,
+            required: true,
+            include: [{
+              model: Permission,
+              required: true
+            }],
+          }],
+          limit: 100
+        }).then(function(userInstances) {
+          expect(userInstances.length).to.equal(2);
+        });
+      });
+
+      it('should return a user with an admin permission type', function() {
+        return User.findAll({
+          where: {
+            Permission: {
+              type: 'admin'
+            }
+          },
+          include: [{ model: Permission, required: true }],
+          order: [['id', 'ASC']],
+          limit: 100
+        }).then(function(userInstances) {
+          expect(userInstances).to.have.length(2);
+          expect(userInstances[0].name).to.equal('UserWithAdminPermission');
+          expect(userInstances[1].name).to.equal('UserWithAdminPermissionAndGroupWithAdminPermission');
+        });
+      });
+
+      it('should return a user with a group that has an admin permission type', function() {
+        return User.findAll({
+          where: {
+            Groups: {
+              Permission: {
+                type: 'admin'
+              }
+            }
+          },
+          include: [{
+            model: Group,
+            required: true,
+            include: [{
+              model: Permission,
+              required: true
+            }]
+          }],
+          order: [['id', 'ASC']],
+          limit: 100
+        }).then(function(userInstances) {
+          expect(userInstances).to.have.length(2);
+          expect(userInstances[0].name).to.equal('UserWithGroupWithAdminPermission');
+          expect(userInstances[0].Permission).to.not.be.ok;
+          expect(userInstances[0].Groups[0]).to.be.ok;
+          expect(userInstances[0].Groups[0].Permission).to.be.ok;
+          expect(userInstances[0].Groups[0].Permission.type).to.equal('admin');
+          expect(userInstances[1].name).to.equal('UserWithAdminPermissionAndGroupWithAdminPermission');
+          expect(userInstances[1].Permission).to.not.be.ok;
+          expect(userInstances[1].Groups[0]).to.be.ok;
+          expect(userInstances[1].Groups[0].Permission).to.be.ok;
+          expect(userInstances[1].Groups[0].Permission.type).to.equal('admin');
+        });
+      });
+
+      it('should return users with admin or user permissions types', function() {
+        return User.findAll({
+          where: {
+            Permission: {
+              type: {
+                $or: ['admin', 'user']
+              }
+            }
+          },
+          include: [{ model: Permission, required: true }],
+          order: [['id', 'ASC']],
+          limit: 100
+        }).then(function(userInstances) {
+          expect(userInstances).to.have.length(4);
+          expect(userInstances[0].name).to.equal('UserWithAdminPermission');
+          expect(userInstances[0].Permission.type).to.equal('admin');
+          expect(userInstances[1].name).to.equal('UserWithAdminPermissionAndGroupWithAdminPermission');
+          expect(userInstances[1].Permission.type).to.equal('admin');
+          expect(userInstances[2].name).to.equal('UserWithUserPermissionAndGroupWithUserPermission');
+          expect(userInstances[2].Permission.type).to.equal('user');
+          expect(userInstances[3].name).to.equal('UserWithUserPermission');
+          expect(userInstances[3].Permission.type).to.equal('user');
+        });
+      });
+
+      it('should find users with an admin permissions type and users with groups with an admin permissions type', function() {
+        return User.findAll({
+          where: {
+            $and: [{
+              Permission: {
+                type: 'admin',
+              },
+              Groups: {
+                Permission: {
+                  type: 'admin'
+                }
+              }
+            }]
+          },
+          include: [
+            {
+              model: Permission,
+              required: true
+            },
+            {
+              model: Group,
+              required: true,
+              include: [{
+                model: Permission,
+                required: true
+              }]
+            }
+          ],
+          order: [['id', 'ASC']],
+          limit: 100
+        }).then(function(userInstances) {
+          expect(userInstances).to.have.length(1);
+          expect(userInstances[0].name).to.equal('UserWithAdminPermissionAndGroupWithAdminPermission');
+          expect(userInstances[0].Permission.type).to.equal('admin');
+          expect(userInstances[0].Groups[0].Permission.type).to.equal('admin');
+        });
+      });
+
+      it('should find users that either have an admin permission type or a group with an admin permission type', function() {
+        return User.findAll({
+          where: {
+            $or: [
+              {
+                Permission: {
+                  type: 'admin',
+                }
+              },
+              {
+                Groups: {
+                  Permission: {
+                    type: 'admin'
+                  }
+                }
+              }
+            ]
+          },
+          include: [
+            {
+              model: Permission,
+              required: false
+            },
+            {
+              model: Group,
+              required: false,
+              include: [{
+                model: Permission,
+                required: false
+              }]
+            }
+          ],
+          order: [['id', 'ASC']],
+          limit: 100
+        }).then(function(userInstances) {
+          expect(userInstances.length).to.equal(3);
+          expect(userInstances[0].name).to.equal('UserWithGroupWithAdminPermission');
+          expect(userInstances[0].Permission).to.not.be.ok;
+          expect(userInstances[0].Groups[0].Permission.type).to.equal('admin');
+          expect(userInstances[1].name).to.equal('UserWithAdminPermission');
+          expect(userInstances[1].Permission.type).to.equal('admin');
+          expect(userInstances[1].Groups[0]).to.not.be.ok;
+          expect(userInstances[2].name).to.equal('UserWithAdminPermissionAndGroupWithAdminPermission');
+          expect(userInstances[2].Permission.type).to.equal('admin');
+          expect(userInstances[2].Groups[0].Permission.type).to.equal('admin');
+        });
+      });
+
+      it('should return a user by filtering on the UsersGroups through table', function() {
+        return User.findAll({
+          where: {
+            Groups: {
+              UsersGroups: {
+                GroupId: 2
+              }
+            }
+          },
+          include: [
+            {
+              model: Permission,
+              required: false
+            },
+            {
+              model: Group,
+              required: false,
+              include: [{
+                model: Permission,
+                required: false
+              }]
+            }
+          ],
+          order: [['id', 'ASC']],
+          limit: 100
+        }).then(function(userInstances) {
+          expect(userInstances).to.have.length(1);
+          expect(userInstances[0].name).to.equal('UserWithUserPermissionAndGroupWithUserPermission');
+        });
+      });
+
+      it('should handle a where clause with a local and a foreign field', function() {
+        return User.findAll({
+          where: {
+            name: { like: '%UserWithAdmin%' },
+            /*
+            Groups: {
+              name: { like: '%Admin%' }
+            }
+            */
+          },
+          include: [{ model: Group, required: true, where: {name : { like: '%Admin%'}} }],
+          order: [['id', 'ASC']],
+          limit: 100
+        })
+        .then(function(userInstances) {
+          expect(userInstances).to.have.length(1);
+          expect(userInstances[0].name).to.equal('UserWithAdminPermissionAndGroupWithAdminPermission');
+          expect(userInstances[0].Groups).to.have.length(1);
+          expect(userInstances[0].Groups[0].name).to.equal('GroupWithAdminPermission');
+        });
+      });
+
+      it('should return a set of users with all associated groups where one group has a specific name', function() {
+        var users = [{ name: 'UserWithTenGroups' },
+                     { name: 'UserWithOneGroup'}]
+        , groups = [{ name: 'SpecialGroup'}]
+
+        var creates = [
+          User.create(users[0]),
+          User.create(users[1]),
+          Group.create(groups[0])
+        ];
+        for (var i=1; i<10; ++i) {
+          creates.push(Group.create({ name: 'GroupNumber' + i }));
+        }
+
+        var self = this;
+        return Promise.all(creates)
+          .then(function(results) {
+            var allGroups = results.slice(2);
+            var associates = [
+              results[0].setGroups(allGroups),
+              results[1].setGroups([results[2]])
+            ];
+            return Promise.all(associates);
+          }).then(function(results) {
+            //self.sequelize.options.logging = console.log;
+            return User.findAll({
+              /**/
+              where: {
+                Groups: {
+                  name: {
+                    like: '%SpecialGroup%'
+                  }
+                }
+              },
+              /**/
+              include: [{ model: Group, required: true }],
+              //include: [{ model: Group, required: true, where: { name: { like: '%SpecialGroup%' } } }],
+              order: [['id', 'ASC']],
+              limit: 2
+            })
+            .then(function(userInstances) {
+              expect(userInstances).to.have.length(2);
+              expect(userInstances[0].Groups).to.have.length(10);
+              expect(userInstances[1].Groups).to.have.length(1);
+            });
+          });
       });
     });
   });
